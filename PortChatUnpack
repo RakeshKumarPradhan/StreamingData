@@ -1,0 +1,648 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO.Ports;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace PortChat
+{
+    class Program
+    {
+        static SerialPort _serialPort;
+        static Queue<byte> recievedData = new Queue<byte>();
+        static List<byte> responseBuffer = new List<byte>();
+        static List<byte> dataList = new List<byte>();
+        static StringBuilder sb = new StringBuilder();
+        static byte[] bytes; static float myFloat; static string strAppend; static string status;
+        static byte mfgId; static byte deviceType; static byte[] deviceAddress = new byte[5];
+        static Stopwatch stopWatch = new Stopwatch();
+        static void Main(string[] args)
+        {
+            StringComparer stringComparer = StringComparer.OrdinalIgnoreCase;
+
+            _serialPort = new SerialPort();
+
+            // Allow the user to set the appropriate properties.
+            _serialPort.PortName = SetPortName(_serialPort.PortName); // "COM4"; //
+            _serialPort.BaudRate = SetPortBaudRate(64); // 64; // _serialPort.BaudRate
+            _serialPort.Parity = SetPortParity(_serialPort.Parity); // Parity.Odd; // 
+            _serialPort.DataBits = SetPortDataBits(_serialPort.DataBits); // 8; // 
+            _serialPort.StopBits = SetPortStopBits(_serialPort.StopBits); // StopBits.One; // 
+            _serialPort.Handshake = SetPortHandshake(_serialPort.Handshake); // Handshake.None; // 
+
+            // Set the read/write timeouts
+            _serialPort.ReadTimeout = 500;
+            _serialPort.WriteTimeout = 500;
+
+            _serialPort.Open();
+            //_continue = true;
+            int command;
+            Console.WriteLine("Enter command {0/3} :");
+            string consoleInput = Console.ReadLine();
+            while (!Int32.TryParse(consoleInput, out command))
+            {
+                Console.WriteLine("Not a valid number. Try again.");
+                consoleInput = Console.ReadLine();
+            }
+            // offset value for the request body. 
+            for (int i = 0; i < 5; ++i)
+                dataList.Add(0xFF);
+            if (command == 0)
+            {
+                Console.WriteLine("Command 0 in hex format, into hart serial interface : ff ff ff ff ff 02 00 00 00 02 ff");
+                // byte[] data = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 02, 00, 00 /* command 0 */, 00, 02, 255 }; // StringToByteArray("ff ff ff ff ff 02 00 00 00 02 ff"); //     ff ff ff ff ff 02 00 00 00 02 ff                  ÿÿÿÿÿ.....ÿ 
+
+                CreateCommandZero(ref dataList);
+                Thread writeThread = new Thread(SerialPortWriteNewThread);
+                writeThread.Start();
+                //for (int i = 0; i < 21; i++) Console.WriteLine("Main thread while in command 0 : {0}", i);
+            }
+            else if (command == 3)
+            {
+                Console.WriteLine("Command 3 in hex format, into hart serial interface :     ff ff ff ff ff 82 25 ca a9 87 e5 03 00 a5 ff");
+                /* prior to command 3 there should have been a command 0 upfront as part of connect, since few values (5 bytes) in request are derived from 0's response. */
+
+                CreateCommandThree(ref dataList);
+                //_serialPort.Write(data, 0, data.Length);
+                Thread writeThread = new Thread(SerialPortWriteNewThread);
+                writeThread.Start();
+                //for (int i = 21; i < 60; i++) Console.WriteLine("Main thread while in command 3 : {0}", i);
+            }
+            else if (command == 13)
+            {
+                Console.WriteLine("Command 13 in hex format, into the hart serial interface : ff ff ff ff ff 82 25 ca a9 87 e5 0d 00 ab ff ");
+                CreateCommandThirteen(ref dataList);
+                Thread writeThread = new Thread(SerialPortWriteNewThread);
+                writeThread.Start();
+            }
+
+            Console.WriteLine("\n\nConsolidated List of the response !!! ");
+            if (command == 0)
+            {
+                stopWatch.Start();
+                CommandZeroResponse(responseBuffer);
+                stopWatch.Reset();
+                stopWatch.Stop();
+            }
+            else if (command == 3)
+            {
+                stopWatch.Start();
+                CommandThreeResponse(responseBuffer);
+                stopWatch.Reset();
+                stopWatch.Stop();
+            }
+            else if (command == 13)
+            {
+                stopWatch.Start();
+                CommandThirteenResponse(responseBuffer);
+                stopWatch.Reset();
+                stopWatch.Stop();
+            }
+
+            Console.WriteLine("Press enter/key to quit!");
+            Console.ReadLine();
+
+            _serialPort.Close();
+        }
+
+        private static void SerialPortWrite(List<byte> dataList)
+        {
+            _serialPort.Write(dataList.ToArray(), 0, dataList.Count());
+
+            _serialPort.DataReceived += new SerialDataReceivedEventHandler(port_DataReceived);
+            void port_DataReceived(object sender, SerialDataReceivedEventArgs e)
+            {
+                // Show all the incoming data in the port's buffer
+                byte[] data1 = new byte[_serialPort.BytesToRead];
+                _serialPort.Read(data1, 0, data1.Length);
+                data1.ToList().ForEach(b => recievedData.Enqueue(b));
+                HandleSerialData(data1);
+            }
+        }
+
+        static void SerialPortWriteNewThread()
+        {
+            _serialPort.Write(dataList.ToArray(), 0, dataList.Count());
+
+            _serialPort.DataReceived += new SerialDataReceivedEventHandler(port_DataReceived);
+            void port_DataReceived(object sender, SerialDataReceivedEventArgs e)
+            {
+                // Show all the incoming data in the port's buffer
+                byte[] data1 = new byte[_serialPort.BytesToRead];
+                _serialPort.Read(data1, 0, data1.Length);
+                data1.ToList().ForEach(b => recievedData.Enqueue(b));
+                HandleSerialData(data1);
+            }
+        }
+
+        private static void CreateCommandZero(ref List<byte> dataList)
+        {
+            dataList.Add(02); /* delim */
+            dataList.Add(00); /* add address */
+            dataList.Add(00); /* command 0 */
+            dataList.Add(00); /* holder for length */
+            dataList.Add(02); dataList.Add(0xFF); /* these last bytes are added as a padding probably, needs clarification. */
+            //dataList.Add(0xFF); dataList.Add(0xFF); dataList.Add(0xFF); dataList.Add(0xFF);
+        }
+
+        private static void CreateCommandThree(ref List<byte> dataList)
+        {
+            // create command zero
+            CreateCommandZero(ref dataList);
+            // serial port write
+            Thread writeThread = new Thread(SerialPortWriteNewThread);
+            writeThread.Start();
+            // command zero response 
+            stopWatch.Start();
+            CommandZeroResponse(responseBuffer);
+            stopWatch.Reset();
+            stopWatch.Stop();
+            // capture the address from command 0 
+
+            if (dataList.Count() > 5)
+            {
+                dataList.RemoveRange(5, dataList.Count() - 5);
+            }
+            dataList.Add(0x82); /* 0x82 */ //  Delimiter for long address request message
+            // dataList.Add(37); dataList.Add(202); dataList.Add(169); dataList.Add(135); dataList.Add(229);
+            /* 5 bytes - 1:MfgId & 0x3f(test[12]), 2:deviceType(test[13]), 3:from command0's response (test[20], test[21], test[22])
+            Also called as device address. */
+            dataList.AddRange(deviceAddress); // add device address. 
+            dataList.Add(03); /* command 3 */
+            dataList.Add(00); /* holder for length */
+            dataList.Add(165); dataList.Add(0xFF); /* these last bytes are added as a padding probably, needs clarification.
+                _bCmmnd0_DataSize , or, checksum, or, bXor. */
+            //    ff ff ff ff ff 82 25 ca a9 87 e5 03 00 a5 ff      ÿÿÿÿÿ‚%Ê©‡å..¥ÿ  
+        }
+
+        private static void CreateCommandThirteen(ref List<byte> dataList)
+        {
+            // create command zero
+            CreateCommandZero(ref dataList);
+            // serial port write
+            Thread writeThread = new Thread(SerialPortWriteNewThread);
+            writeThread.Start();
+            // command zero response 
+            stopWatch.Start();
+            CommandZeroResponse(responseBuffer);
+            stopWatch.Reset();
+            stopWatch.Stop();
+            // capture the address from command 0 
+
+            if (dataList.Count() > 5)
+            {
+                dataList.RemoveRange(5, dataList.Count() - 5);
+            }
+            dataList.Add(0x82); /* 0x82 */ //  Delimiter for long address request message
+            dataList.AddRange(deviceAddress); // add device address. 
+            dataList.Add(13); /* command 13 */
+            dataList.Add(00); /* holder for length */
+            dataList.Add(171); dataList.Add(0xFF);
+        }
+
+        private static void CommandZeroResponse(List<byte> response)
+        {
+
+            // check here for any errors etc. from the response. 
+            // to check for number of Bytes, Error and Status. 
+            if (response.Count < 25)
+            {
+                if (stopWatch.ElapsedMilliseconds > 10000) // wait timer for error response, etc. 
+                {
+                    Console.WriteLine("Running out of time!!!");
+                    return;
+                }
+                // introduce delay. Time to receive all the streaming response. Recursive calls delayed with a timer.
+                Thread.Sleep(100);
+                /* ~ 400 milli seconds for command 0. Can error upon too much recursion and variable initialization. 
+                */
+                Console.WriteLine("Command 0 recursive call. ");
+                CommandZeroResponse(responseBuffer);
+            }
+            else
+            {
+                Console.WriteLine("HART Command 0 Output.");
+                Console.WriteLine("Count of response bytes : {0} \n", response.Count);
+
+                Console.WriteLine("Dummy : {0} ", response[11].ToString());
+
+                // capture the mfg id here
+                mfgId = Byte.Parse((response[12] & 0x3F).ToString(), System.Globalization.NumberStyles.Any);
+                deviceAddress[0] = mfgId; // device address for further use being created here. 
+                Console.WriteLine("MfgId : {0} ", response[12].ToString());
+
+                // capture device type here. 
+                deviceType = response[13];
+                deviceAddress[1] = deviceType; // device address for further use being created here. 
+                Console.WriteLine("Device Type: {0} ", response[13].ToString());
+
+                Console.WriteLine("Preambles: {0} ", response[14].ToString());
+                Console.WriteLine("CmdRev : {0} ", response[15].ToString());
+                Console.WriteLine("TXRev : {0} ", response[16].ToString());
+                Console.WriteLine("SWRev : {0} ", response[17].ToString());
+                Console.WriteLine("HWrev : {0} ", response[18].ToString());
+                Console.WriteLine("Flags: {0} ", response[19].ToString());
+                deviceAddress[2] = response[20]; // device address for further use being created here. 
+                deviceAddress[3] = response[21]; // device address for further use being created here. 
+                deviceAddress[4] = response[22]; // device address for further use being created here. 
+                //Console.WriteLine("Convert : {0:X2}{1:X2}{2:X2}", test[20], test[21], test[22]);
+                strAppend = sb.AppendFormat("{0:X2}{1:X2}{2:X2}", response[20], response[21], response[22]).ToString(); // deviceId
+                                                                                                                        //Console.WriteLine(deviceId);
+                Console.WriteLine("Device Id : {0} (In hex: {1})", Int64.Parse(strAppend, System.Globalization.NumberStyles.HexNumber), strAppend);
+                Console.WriteLine("Total Time elapsed : {0}", stopWatch.ElapsedMilliseconds);
+
+                // testing for byte array to hex string
+                //byte[] ba = new byte[] {72, 18, 160, 130, 08, 32}; 
+                //StringBuilder hex = new StringBuilder(ba.Length * 2);
+                //foreach (byte b in ba)
+                //    hex.AppendFormat("{0:x2}", b);
+                //Console.WriteLine(hex.ToString());
+
+                //Console.WriteLine(System.Text.Encoding.Default.GetString(ba));
+
+                sb.Clear();
+                response.Clear();
+            }
+        }
+
+        private static void CommandThreeResponse(List<byte> response)
+        {
+            if (response.Count < 41)
+            {
+                if (stopWatch.ElapsedMilliseconds > 30000) // wait timer for the response. 
+                {
+                    Console.WriteLine("Alam!!!timer");
+                    return;
+                }
+                // introduce delay. Time to receive all the streaming response, recursively calls are delayed till streaming output is received. 
+                Thread.Sleep(400);
+                Console.WriteLine("Command 3 recursive call. ");
+                /* ~ 500 milli seconds for command 3. Exception is StackOverFlow exception at lower limits. 
+                */
+                CommandThreeResponse(responseBuffer);
+            }
+            else
+            {
+                Console.WriteLine("HART Command 3 Output.");
+                Console.WriteLine("Count of response bytes : {0} \n", response.Count);
+
+                // Check here for an errors, status etc. from the response. 
+                status = sb.AppendFormat("{0:X2}{1:X2}", response[13], response[14]).ToString();
+                // hex to decimal converter. 
+                Console.WriteLine("Status : {0}", status);
+                Console.WriteLine("Status in decimal : {0} ", Convert.ToInt32(status, 16));
+                sb.Clear();
+
+                strAppend = sb.AppendFormat("{0:X2}{1:X2}{2:X2}{3:X2}", response[15], response[16], response[17], response[18]).ToString();
+                bytes = BitConverter.GetBytes(uint.Parse(strAppend, System.Globalization.NumberStyles.AllowHexSpecifier));
+                myFloat = BitConverter.ToSingle(bytes, 0);
+                Console.WriteLine("Sig : {0} ", myFloat);
+
+                Console.WriteLine("PosUnits : {0} ", response[19].ToString());
+
+                sb.Clear();
+                //string pou = sb.AppendFormat("{0:X2}{1:X2}{2:X2}{3:X2}", test[20], test[21], test[22], test[23]).ToString();
+                strAppend = sb.AppendFormat("{0:X2}{1:X2}{2:X2}{3:X2}", response[20], response[21], response[22], response[23]).ToString();
+                bytes = BitConverter.GetBytes(uint.Parse(strAppend, System.Globalization.NumberStyles.AllowHexSpecifier));
+                myFloat = BitConverter.ToSingle(bytes, 0);
+                Console.WriteLine("Pos : {0} ", myFloat);
+
+                Console.WriteLine("PresUnits3 : {0} ", response[24].ToString());
+
+                sb.Clear();
+                //string pres = sb.AppendFormat("{0:X2}{1:X2}{2:X2}{3:X2}", test[25], test[26], test[27], test[28]).ToString();
+                strAppend = sb.AppendFormat("{0:X2}{1:X2}{2:X2}{3:X2}", response[25], response[26], response[27], response[28]).ToString();
+                bytes = BitConverter.GetBytes(uint.Parse(strAppend, System.Globalization.NumberStyles.AllowHexSpecifier));
+                myFloat = BitConverter.ToSingle(bytes, 0);
+                Console.WriteLine("Pres : {0} ", myFloat);
+
+                Console.WriteLine("TVUnits : {0} ", response[29].ToString());
+
+                sb.Clear();
+                //string tv = sb.AppendFormat("{0:X2}{1:X2}{2:X2}{3:X2}", test[30], test[31], test[32], test[33]).ToString();
+                strAppend = sb.AppendFormat("{0:X2}{1:X2}{2:X2}{3:X2}", response[30], response[31], response[32], response[33]).ToString();
+                bytes = BitConverter.GetBytes(uint.Parse(strAppend, System.Globalization.NumberStyles.AllowHexSpecifier));
+                myFloat = BitConverter.ToSingle(bytes, 0);
+                Console.WriteLine("TV : {0} ", myFloat);
+
+                Console.WriteLine("QVUnits : {0} ", response[34].ToString());
+                sb.Clear();
+                //string qv = sb.AppendFormat("{0:X2}{1:X2}{2:X2}{3:X2}", test[35], test[36], test[37], test[38]).ToString();
+                strAppend = sb.AppendFormat("{0:X2}{1:X2}{2:X2}{3:X2}", response[35], response[36], response[37], response[38]).ToString();
+                bytes = BitConverter.GetBytes(uint.Parse(strAppend, System.Globalization.NumberStyles.AllowHexSpecifier));
+                myFloat = BitConverter.ToSingle(bytes, 0);
+                Console.WriteLine("QV : {0} ", myFloat);
+                Console.WriteLine("Total Time elapsed : {0}", stopWatch.ElapsedMilliseconds);
+                sb.Clear();
+                response.Clear();
+            }
+        }
+
+        private static void CommandThirteenResponse(List<byte> response)
+        {
+            if (response.Count < 38)
+            {
+                if (stopWatch.ElapsedMilliseconds > 4000) // wait timer for the response. 
+                {
+                    Console.WriteLine("Alam!!!timer");
+                    return;
+                }
+                Thread.Sleep(400);
+                Console.WriteLine("Command 13 recursive call. ");
+                CommandThirteenResponse(response);
+            }
+            else
+            {
+                Console.WriteLine("HART Command 13 Output.");
+                Console.WriteLine("Count of response bytes : {0} \n", response.Count);
+                Console.WriteLine(response[15]);
+
+                char test = UnpackChar(response[15]);
+                Console.WriteLine(test);
+
+                strAppend = sb.AppendFormat("{0:X2}{1:X2}{2:X2}", response[15], response[16], response[17]).ToString();
+
+                int int64 = Int32.Parse(strAppend, NumberStyles.HexNumber);
+                int b = 4*(strAppend.Length); 
+                int a = (b - ((6*b)/8)); 
+
+                int64 = int64 >> a;
+                var bytes = BitConverter.GetBytes(int64);
+                var bitArray = new BitArray(bytes);
+
+                bool[] bitsOld = new bool[bitArray.Count];
+                bitArray.CopyTo(bitsOld, 0);
+                Array.Resize(ref bitsOld, 18);
+                Array.Reverse(bitsOld);
+
+                bool[] firstAlphabet = new bool[6];
+                bool[] secondAlphabet = new bool[6];
+                bool[] thirdAlphabet = new bool[6]; 
+
+                for(int i=0; i< bitsOld.Length; i = i + 6)
+                {
+                    firstAlphabet = bitsOld.Skip(i).Take(6).Reverse().ToArray();
+                    ConvertBitsToAlphabet(firstAlphabet);
+                }
+
+                //firstAlphabet = bitsOld.Take(6).Reverse().ToArray();
+                //secondAlphabet = bitsOld.Skip(6).Take(6).Reverse().ToArray();
+                //thirdAlphabet = bitsOld.Skip(12).Take(6).Reverse().ToArray();
+
+                //ConvertBitsToAlphabet(firstAlphabet);
+                //ConvertBitsToAlphabet(secondAlphabet);
+                //ConvertBitsToAlphabet(thirdAlphabet);
+
+                //bool[] bitsnew = new bool[16];
+                //int i = 0, j = 0; 
+                //while(i < 12 && j < bitsnew.Count())
+                //{
+                //    if(i == 0)
+                //    {
+                //        bitsnew[j] = bitsOld[i];
+                //        i++; j++; 
+                //    }
+                //    else if (i >= 1 && i % 6 != 0)
+                //    {
+                //        bitsnew[j] = bitsOld[i];
+                //        i++; j++; 
+                //    }
+                //    else if(i % 6 == 0)
+                //    {
+                //        bitsnew[j] = !bitsOld[i-1];
+                //        bitsnew[j + 1] = false;
+                //        bitsnew[j + 2] = bitsOld[i];
+                //        j = j + 3; i++; 
+                //    }
+                //}
+
+                // Array.Reverse(bitsnew); 
+
+                //StringBuilder sb3 = new StringBuilder();
+                //for (int ijh = 0; ijh < bitsnew.Length; ijh++)
+                //{
+                //    if (bitsnew[ijh])
+                //    {
+                //        sb3.Append((char)('A' + ijh));
+                //    }
+                //}
+
+                //string result = sb3.ToString();
+                Console.WriteLine("\n");
+                sb.Clear();
+                response.Clear();
+            }
+        }
+
+        private static void ConvertBitsToAlphabet(bool[] alphabet)
+        {
+            BitArray arr = new BitArray(alphabet);
+            byte[] data = new byte[1];
+            arr.CopyTo(data, 0);
+            string hex = BitConverter.ToString(data);
+
+            if (hex == "12")
+                Console.Write("R");
+            if (hex == "01")
+                Console.Write("A");
+            if (hex == "0A")
+                Console.Write("J");
+        }
+
+        private static char UnpackChar(byte response1)
+        {
+            BitArray b = new BitArray(new byte[] { response1 });
+
+            bool[] bits1 = new bool[b.Count];
+            b.CopyTo(bits1, 0);
+            Array.Reverse(bits1);
+            bits1[6] = !bits1[5];
+            bits1[7] = false;
+
+            int value = 0;
+            for (int i = 0; i < bits1.Length; i++)
+            {
+                if (bits1[i])
+                    value += Convert.ToInt16(Math.Pow(2, i));
+            }
+            Console.WriteLine((char)value);
+            return (char)value;
+        }
+
+        private static void HandleSerialData(byte[] data1)
+        {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < data1.Length; i++)
+            {
+                sb.AppendFormat("{0:X2} ", data1[i]);
+                //Console.WriteLine(sb);
+            }
+
+            var x = sb.ToString();
+            responseBuffer.AddRange(data1);
+        }
+
+        public static string SetPortName(string defaultPortName)
+        {
+            string portName;
+
+            Console.WriteLine("Available Ports:");
+            foreach (string s in SerialPort.GetPortNames())
+            {
+                Console.WriteLine("   {0}", s);
+                defaultPortName = s;
+            }
+
+            Console.Write("COM port({0}): ", defaultPortName);
+            portName = Console.ReadLine();
+
+            if (portName == "")
+            {
+                portName = defaultPortName;
+            }
+            return portName;
+        }
+
+        public static int SetPortBaudRate(int defaultPortBaudRate)
+        {
+            string baudRate;
+
+            Console.Write("Baud Rate({0}): ", defaultPortBaudRate);
+            baudRate = Console.ReadLine();
+
+            if (baudRate == "")
+            {
+                baudRate = defaultPortBaudRate.ToString();
+            }
+
+            return int.Parse(baudRate);
+        }
+
+        public static Parity SetPortParity(Parity defaultPortParity)
+        {
+            string parity;
+
+            Console.WriteLine("Available Parity options:");
+            foreach (string s in Enum.GetNames(typeof(Parity)))
+            {
+                Console.WriteLine("   {0}", s);
+            }
+
+            Console.Write("Parity({0}):", defaultPortParity.ToString());
+            parity = Console.ReadLine();
+
+            if (parity == "")
+            {
+                parity = defaultPortParity.ToString();
+            }
+
+            return (Parity)Enum.Parse(typeof(Parity), parity);
+        }
+
+        public static int SetPortDataBits(int defaultPortDataBits)
+        {
+            string dataBits;
+
+            Console.Write("Data Bits({0}): ", defaultPortDataBits);
+            dataBits = Console.ReadLine();
+
+            if (dataBits == "")
+            {
+                dataBits = defaultPortDataBits.ToString();
+            }
+
+            return int.Parse(dataBits);
+        }
+
+        public static StopBits SetPortStopBits(StopBits defaultPortStopBits)
+        {
+            string stopBits;
+
+            Console.WriteLine("Available Stop Bits options:");
+            foreach (string s in Enum.GetNames(typeof(StopBits)))
+            {
+                Console.WriteLine("   {0}", s);
+            }
+
+            Console.Write("Stop Bits({0}):", defaultPortStopBits.ToString());
+            stopBits = Console.ReadLine();
+
+            if (stopBits == "")
+            {
+                stopBits = defaultPortStopBits.ToString();
+            }
+
+            return (StopBits)Enum.Parse(typeof(StopBits), stopBits);
+        }
+
+        public static Handshake SetPortHandshake(Handshake defaultPortHandshake)
+        {
+            string handshake;
+
+            Console.WriteLine("Available Handshake options:");
+            foreach (string s in Enum.GetNames(typeof(Handshake)))
+            {
+                Console.WriteLine("   {0}", s);
+            }
+
+            Console.Write("Handshake({0}):", defaultPortHandshake.ToString());
+            handshake = Console.ReadLine();
+
+            if (handshake == "")
+            {
+                handshake = defaultPortHandshake.ToString();
+            }
+
+            return (Handshake)Enum.Parse(typeof(Handshake), handshake);
+        }
+
+    }
+}
+
+
+// Ref - https://stackoverflow.com/questions/13754694/what-is-the-correct-way-to-read-a-serial-port-using-net-framework
+// https://codesamplez.com/programming/serial-port-communication-c-sharp
+// https://stackoverflow.com/questions/21337123/read-and-store-bytes-from-serial-port
+// https://stackoverflow.com/questions/44378327/read-all-buffer-data-from-serial-port-with-c-sharp
+// https://stackoverflow.com/questions/311165/how-do-you-convert-a-byte-array-to-a-hexadecimal-string-and-vice-versa?rq=1
+// https://stackoverflow.com/questions/74148/how-to-convert-numbers-between-hexadecimal-and-decimal
+// https://stackoverflow.com/questions/10143980/implementing-a-timeout-in-c-sharp
+// https://stackoverflow.com/questions/6758196/convert-int-to-a-bit-array-in-net
+// https://stackoverflow.com/questions/406485/array-slices-in-c-sharp
+
+// the different types of error codes are :- 
+/* 
+#define CB_BUSY 0
+#define CB_COMPLETED_NO_ERRORS 1
+#define CB_CKSUM_ERROR -1
+#define CB_COULD_NOT_START -2
+#define CB_TIMEOUT -3
+#define CB_INVALID_RESPONSE -4
+#define CB_USER_ABORT -5
+#define CB_HART_ERROR -6
+#define CB_MUX_GENDER -7
+#define CB_MUX_BUSY -8
+#define CB_CMD_NOTIMPLEMENTED -9
+#define CB_WRONGPROTOCOL -10
+#define CB_WRONGDEVICE -11
+#define CB_WRONGMASTER -12
+#define CB_COMERROR -13
+*/
+
+//store the long address for future use
+/* 
+  m_cAddress[0]=cMfgID & 0x3F;
+  m_cAddress[1]=cDeviceType;
+  m_cAddress[2]=((char*)&nDeviceID)[2];
+  m_cAddress[3]=((char*)&nDeviceID)[1];
+  m_cAddress[4]=((char*)&nDeviceID)[0];
+*/
+/*
+const byte _Delimiter_ShrtRq = 0x02;     //  Delimiter for short address request message
+const byte _Delimiter_LngRq = 0x82;      //  Delimiter for long address request message
+*/
